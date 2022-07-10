@@ -5,6 +5,13 @@ PROG=/usr/bin/zerotier-one
 PROGCLI=/usr/bin/zerotier-cli
 PROGIDT=/usr/bin/zerotier-idtool
 config_path="/etc/storage/zerotier-one"
+
+out_message()
+{
+	logger -t "zerotier" "$1"
+	echo "$1"
+}
+
 start_instance() {
 	cfg="$1"
 	echo $cfg
@@ -21,41 +28,39 @@ start_instance() {
 		args="$args -p$port"
 	fi
 	if [ -z "$secret" ]; then
-		logger -t "zerotier" "设备密匙为空,正在生成密匙,请稍后..."
+		out_message "设备密匙为空,正在生成密匙,请稍后..."
 		sf="$config_path/identity.secret"
 		pf="$config_path/identity.public"
 		$PROGIDT generate "$sf" "$pf"  >/dev/null
 		[ $? -ne 0 ] && return 1
 		secret="$(cat $sf)"
-		#rm "$sf"
 		nvram set zerotier_secret="$secret"
 		nvram commit
 	fi
 	if [ -n "$secret" ]; then
-		logger -t "zerotier" "找到密匙,正在写入文件,请稍后..."
+ 		out_message "找到密匙,正在写入文件,请稍后..."
 		echo "$secret" >$config_path/identity.secret
 		$PROGIDT getpublic $config_path/identity.secret >$config_path/identity.public
-		#rm -f $config_path/identity.public
 	fi
 
 	add_join $(nvram get zerotier_id)
-
+ 
 	$PROG $args $config_path >/dev/null 2>&1 &
-		
+  
 	rules
 	
 	if [ -n "$moonid" ]; then
 		$PROGCLI -D$config_path orbit $moonid $moonid
-		logger -t "zerotier" "orbit moonid $moonid ok!"
+		out_message "orbit moonid $moonid ok!"
 	fi
 
 
 	if [ -n "$enablemoonserv" ]; then
 		if [ "$enablemoonserv" -eq "1" ]; then
-			logger -t "zerotier" "creat moon start"
+			out_message "create moon start"
 			creat_moon
 		else
-			logger -t "zerotier" "remove moon start"
+			out_message "remove moon start"
 			remove_moon
 		fi
 	fi
@@ -67,22 +72,25 @@ add_join() {
 
 
 rules() {
+	out_message "正在等待Zerotier 接口启动!"
 	while [ "$(ifconfig | grep zt | awk '{print $1}')" = "" ]; do
 		sleep 1
 	done
 	nat_enable=$(nvram get zerotier_nat)
 	zt0=$(ifconfig | grep zt | awk '{print $1}')
-	logger -t "zerotier" "zt interface $zt0 is started!"
+  	out_message "Zerotier 接口 $zt0 已启动!"
 	del_rules
 	iptables -A INPUT -i $zt0 -j ACCEPT
 	iptables -A FORWARD -i $zt0 -o $zt0 -j ACCEPT
 	iptables -A FORWARD -i $zt0 -j ACCEPT
 	if [ $nat_enable -eq 1 ]; then
 		iptables -t nat -A POSTROUTING -o $zt0 -j MASQUERADE
+		out_message "正在等待ZeroTier网络授权及分配$zt0 网络地址..."
 		while [ "$(ip route | grep "dev $zt0  proto" | awk '{print $1}')" = "" ]; do
 			sleep 1
-	    done
+  	done
 		ip_segment=`ip route | grep "dev $zt0  proto" | awk '{print $1}'`
+		out_message "成功获得zerotier授权,网段$ip_segment."
 		iptables -t nat -A POSTROUTING -s $ip_segment -j MASQUERADE
 		zero_route "add"
 	fi
@@ -98,6 +106,7 @@ del_rules() {
 	iptables -D INPUT -i $zt0 -j ACCEPT 2>/dev/null
 	iptables -t nat -D POSTROUTING -o $zt0 -j MASQUERADE 2>/dev/null
 	iptables -t nat -D POSTROUTING -s $ip_segment -j MASQUERADE 2>/dev/null
+  	out_message "已完成删除 $zt0 防火墙规则."
 }
 
 zero_route(){
@@ -110,26 +119,28 @@ zero_route(){
 		zero_route=`nvram get zero_route_x$j`
 		if [ "$1" = "add" ]; then
 			if [ $route_enable -ne 0 ]; then
+				out_message "添加本地静态路由 从 $zero_ip 到 $zero_route 设备 $zt0"
 				ip route add $zero_ip via $zero_route dev $zt0
-				echo "$zt0"
 			fi
 		else
+      			out_message "删除本地静态路由 从 $zero_ip 到 $zero_route 设备 $zt0"
 			ip route del $zero_ip via $zero_route dev $zt0
 		fi
 	done
 }
 
 start_zero() {
-	logger -t "zerotier" "正在启动zerotier"
+	out_message "正在启动zerotier..."
 	kill_z
 	start_instance 'zerotier'
+	out_message "已完成启动zerotier."
 
 }
 kill_z() {
 	killall -9 zerotier-one
 }
 stop_zero() {
-	logger -t "zerotier" "关闭zerotier"
+	out_message "关闭zerotier"
 	del_rules
 	zero_route "del"
 	kill_z
@@ -139,12 +150,12 @@ stop_zero() {
 #创建moon节点
 creat_moon(){
 	moonip="$(nvram get zerotiermoon_ip)"
-	logger -t "zerotier" "moonip $moonip"
+	out_message "moonip $moonip"
 	#检查是否合法ip
 	regex="\b(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[1-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[1-9])\b"
 	ckStep2=`echo $moonip | egrep $regex | wc -l`
 
-	logger -t "zerotier" "搭建ZeroTier的Moon中转服务器，生成moon配置文件"
+	out_message "搭建ZeroTier的Moon中转服务器，生成moon配置文件"
 	if [ -z "$moonip" ]; then
 		#自动获取wanip
 		ip_addr=`ifconfig -a ppp0 | grep 'inet addr:' | cut -d: -f2 | awk '{ print $1}'`
@@ -154,29 +165,29 @@ creat_moon(){
 	else
 		ip_addr=$moonip
 	fi
-	logger -t "zerotier" "moonip $ip_addr"
+	out_message "moonip $ip_addr"
 	if [ -e $config_path/identity.public ]; then
 
 		$PROGIDT initmoon $config_path/identity.public > $config_path/moon.json
 		if `sed -i "s/\[\]/\[ \"$ip_addr\/9993\" \]/" $config_path/moon.json >/dev/null 2>/dev/null`; then
-			logger -t "zerotier" "生成moon配置文件成功"
+			out_message "生成moon配置文件成功"
 		else
-			logger -t "zerotier" "生成moon配置文件失败"
+			out_message "生成moon配置文件失败"
 		fi
 
-		logger -t "zerotier" "生成签名文件"
+		out_message "生成签名文件"
 		cd $config_path
 		pwd
 		$PROGIDT genmoon $config_path/moon.json
 		[ $? -ne 0 ] && return 1
-		logger -t "zerotier" "创建moons.d文件夹，并把签名文件移动到文件夹内"
+		out_message "创建moons.d文件夹，并把签名文件移动到文件夹内"
 		if [ ! -d "$config_path/moons.d" ]; then
 			mkdir -p $config_path/moons.d
-		fi
+		fi   
 		
 		#服务器加入moon server
 		mv $config_path/*.moon $config_path/moons.d/ >/dev/null 2>&1
-		logger -t "zerotier" "moon节点创建完成"
+		out_message "moon节点创建完成"
 
 		zmoonid=`cat moon.json | awk -F "[id]" '/"id"/{print$0}'` >/dev/null 2>&1
 		zmoonid=`echo $zmoonid | awk -F "[:]" '/"id"/{print$2}'` >/dev/null 2>&1
@@ -185,7 +196,7 @@ creat_moon(){
 		nvram set zerotiermoon_id="$zmoonid"
 		nvram commit
 	else
-		logger -t "zerotier" "identity.public不存在"
+		out_message "identity.public不存在"
 	fi
 }
 
